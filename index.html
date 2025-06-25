@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Metaballs – collision + long-range gravity</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #111;
+            overflow: hidden
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: #111;
+            touch-action: none;
+            cursor: grab
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        /* ---------- canvas helpers ---------- */
+        const cvs = document.getElementById('canvas');
+        const ctx = cvs.getContext('2d');
+        function resize() { cvs.width = innerWidth; cvs.height = innerHeight; } addEventListener('resize', resize); resize();
+
+        /* ---------- physics constants ---------- */
+        const FRICTION = 0.994;   // gentle drag per frame
+        const MIN_SPEED = 0.25;    // px / frame – prevent chilling
+        const RESTITUTION = 0.95;    // collision elasticity 1=perfectly elastic
+        const G = 0.05;    // gravitational constant (tune for feel)
+        const SOFTENING2 = 2500;    // numerical softening (px^2)
+        const GRAVITY_CUTOFF_FACTOR = 1.05; // no gravity inside 105% of sum radii (prevents sticking)
+
+        /* ---------- metaball ---------- */
+        class Ball {
+            constructor(x, y, r) {
+                this.x = x; this.y = y; this.r = r;
+                const sp = 0.6 + Math.random() * 0.8, ang = Math.random() * Math.PI * 2;
+                this.vx = Math.cos(ang) * sp; this.vy = Math.sin(ang) * sp;
+                this.m = r * r; // mass ~ area
+            }
+            tick() {
+                this.x += this.vx; this.y += this.vy;
+                // wall bounce
+                if ((this.x < this.r && this.vx < 0) || (this.x > cvs.width - this.r && this.vx > 0)) this.vx *= -RESTITUTION;
+                if ((this.y < this.r && this.vy < 0) || (this.y > cvs.height - this.r && this.vy > 0)) this.vy *= -RESTITUTION;
+                // friction
+                this.vx *= FRICTION; this.vy *= FRICTION;
+                // keep some motion
+                const speed = Math.hypot(this.vx, this.vy);
+                if (speed < MIN_SPEED) {
+                    if (speed === 0) { const ang = Math.random() * Math.PI * 2; this.vx = Math.cos(ang) * MIN_SPEED; this.vy = Math.sin(ang) * MIN_SPEED; }
+                    else { const k = MIN_SPEED / speed; this.vx *= k; this.vy *= k; }
+                }
+            }
+        }
+
+        /* ---------- create balls ---------- */
+        const balls = [];
+        for (let i = 0; i < 6; i++) {
+            const r = 40 + Math.random() * 60;
+            balls.push(new Ball(Math.random() * innerWidth, Math.random() * innerHeight, r));
+        }
+
+        /* ---------- scalar field ---------- */
+        const threshold = 1;
+        function field(x, y) {
+            let sum = 0; for (const b of balls) { const dx = x - b.x, dy = y - b.y; sum += (b.r * b.r) / (dx * dx + dy * dy); } return sum;
+        }
+
+        /* ---------- marching squares ---------- */
+        const cell = 4;
+        function drawContour() {
+            const rows = Math.ceil(cvs.height / cell), cols = Math.ceil(cvs.width / cell);
+            ctx.beginPath();
+            for (let j = 0; j < rows - 1; j++) {
+                const y = j * cell, y1 = y + cell;
+                for (let i = 0; i < cols - 1; i++) {
+                    const x = i * cell, x1 = x + cell;
+                    const tl = field(x, y) > threshold ? 1 : 0;
+                    const tr = field(x1, y) > threshold ? 1 : 0;
+                    const br = field(x1, y1) > threshold ? 1 : 0;
+                    const bl = field(x, y1) > threshold ? 1 : 0;
+                    const s = (tl << 3) | (tr << 2) | (br << 1) | bl; if (s === 0 || s === 15) continue;
+                    const xm = x + cell / 2, ym = y + cell / 2;
+                    const p = [[x, ym], [xm, y], [x1, ym], [xm, y1]]; const seg = (a, b) => { ctx.moveTo(...a); ctx.lineTo(...b); };
+                    switch (s) {
+                        case 1: case 14: seg(p[0], p[3]); break;
+                        case 2: case 13: seg(p[3], p[2]); break;
+                        case 3: case 12: seg(p[0], p[2]); break;
+                        case 4: case 11: seg(p[1], p[2]); break;
+                        case 5: seg(p[0], p[1]); seg(p[2], p[3]); break;
+                        case 6: case 9: seg(p[1], p[3]); break;
+                        case 7: case 8: seg(p[1], p[0]); break;
+                        case 10: seg(p[1], p[2]); seg(p[0], p[3]); break;
+                    }
+                }
+            }
+            ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+        }
+
+        /* ---------- collisions ---------- */
+        function handleCollisions() {
+            for (let i = 0; i < balls.length; i++) {
+                const a = balls[i];
+                for (let j = i + 1; j < balls.length; j++) {
+                    const b = balls[j];
+                    const dx = b.x - a.x, dy = b.y - a.y; const dist = Math.hypot(dx, dy);
+                    const minDist = a.r + b.r;
+                    if (dist < minDist && dist > 0) {
+                        // positional correction
+                        const overlap = (minDist - dist) / 2; const nx = dx / dist, ny = dy / dist;
+                        a.x -= nx * overlap; a.y -= ny * overlap; b.x += nx * overlap; b.y += ny * overlap;
+                        // impulse
+                        const rvx = a.vx - b.vx, rvy = a.vy - b.vy; const velAlong = rvx * nx + rvy * ny; if (velAlong > 0) continue;
+                        const jImp = -(1 + RESTITUTION) * velAlong / (1 / a.m + 1 / b.m);
+                        const jx = jImp * nx, jy = jImp * ny;
+                        a.vx += jx / a.m; a.vy += jy / a.m; b.vx -= jx / b.m; b.vy -= jy / b.m;
+                    }
+                }
+            }
+        }
+
+        /* ---------- long-range gravity (disabled at close range) ---------- */
+        function applyGravity() {
+            for (let i = 0; i < balls.length; i++) {
+                const a = balls[i];
+                for (let j = i + 1; j < balls.length; j++) {
+                    const b = balls[j];
+                    let dx = b.x - a.x, dy = b.y - a.y; let dist2 = dx * dx + dy * dy + SOFTENING2; const dist = Math.sqrt(dist2);
+                    const cutoff = (a.r + b.r) * GRAVITY_CUTOFF_FACTOR;
+                    if (dist < cutoff) continue; // too close -> skip gravity to avoid sticking
+                    const invDist = 1 / dist; const force = G * invDist * invDist; // G / dist^2
+                    const ax = force * dx; const ay = force * dy;
+                    a.vx += ax; a.vy += ay; b.vx -= ax; b.vy -= ay;
+                }
+            }
+        }
+
+        /* ---------- drag / throw ---------- */
+        let dragBall = null, dragHist = []; function rec(e) { const r = cvs.getBoundingClientRect(); dragHist.push({ x: e.clientX - r.left, y: e.clientY - r.top, t: performance.now() }); while (dragHist.length > 8) dragHist.shift(); }
+
+        cvs.addEventListener('pointerdown', e => { const r = cvs.getBoundingClientRect(); const px = e.clientX - r.left, py = e.clientY - r.top; dragBall = balls.find(b => (px - b.x) ** 2 + (py - b.y) ** 2 <= b.r * b.r); if (dragBall) { cvs.setPointerCapture(e.pointerId); dragHist = []; rec(e); } });
+
+        cvs.addEventListener('pointermove', e => { if (!dragBall) return; const r = cvs.getBoundingClientRect(); dragBall.x = e.clientX - r.left; dragBall.y = e.clientY - r.top; dragBall.vx = dragBall.vy = 0; rec(e); });
+
+        function release() { if (!dragBall) return; if (dragHist.length > 1) { const a = dragHist[0], b = dragHist.at(-1), dt = b.t - a.t || 1; let vx = (b.x - a.x) / dt * 16, vy = (b.y - a.y) / dt * 16; const max = 25, mag = Math.hypot(vx, vy); if (mag > max) { vx *= max / mag; vy *= max / mag; } dragBall.vx = vx; dragBall.vy = vy; } dragBall = null; dragHist = []; }
+
+        cvs.addEventListener('pointerup', release); cvs.addEventListener('pointercancel', release);
+
+        /* ---------- main loop ---------- */
+        function loop() { ctx.clearRect(0, 0, cvs.width, cvs.height); applyGravity(); for (const b of balls) if (b !== dragBall) b.tick(); handleCollisions(); drawContour(); requestAnimationFrame(loop); } loop();
+    </script>
+</body>
+
+</html>
